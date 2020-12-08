@@ -53,6 +53,9 @@ class PseudoLabeling(object):
             self.p[index] = self.alpha*self.p[index] + (1.0-self.alpha)*prediction
         else:
             self.p[index] = prediction
+    
+    def update_weight(self, weights, index):
+        self.weight[index] = weights
 
     def get_weight(self, index):
         return self.weight[index]

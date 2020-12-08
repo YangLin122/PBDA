@@ -2,7 +2,24 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import math
 from typing import Tuple, Optional, List, Dict
+
+class GaussianDropout(nn.Module):
+    def __init__(self, drop_rate):
+        self.drop_rate = drop_rate
+        self.mean = 1.0
+        self.std = math.sqrt(drop_rate/(1.0-drop_rate))
+    
+    def forward(self, x):
+        if self.training:
+            # gaussian_noise = torch.normal(self.mean, self.std, x.size()).to(x.device)
+            gaussian_noise = torch.randn_like(x, requires_grad=False).to(x.device) * self.std + self.mean
+            return x * gaussian_noise
+        else:
+            return x
+
+
 
 class MCdropClassifier(nn.Module):
     def __init__(self, 
@@ -53,9 +70,14 @@ class MCdropClassifier(nn.Module):
     def _make_dropout(self, dropout_rate, dropout_type) -> nn.Module:
         if dropout_type == 'Bernoulli':
             return nn.Dropout(dropout_rate)
+        if dropout_type == 'Gaussian':
+            return GaussianDropout(dropout_rate)
         else:
             raise ValueError(f'Dropout type not found')
-
+    
+    def activate_dropout(self):
+        self.bottleneck_drop.train()
+        self.classifier_drop.train()
 
     def forward(self, x) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.backbone(x)

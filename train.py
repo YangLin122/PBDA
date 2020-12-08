@@ -20,6 +20,7 @@ import numpy as np
 sys.path.append('.')
 from adaptation.pac_bayes import jointdisagreement
 from adaptation.pseudo_labeling import PseudoLabeling
+from adaptation,uncertainty import VariationRatio, PredictiveEntropy, MutualInfo
 from modules.kernels import JointMultipleKernelMaximumMeanDiscrepancy, GaussianKernel
 from modules.classifier import MCdropClassifier
 import vision.datasets as datasets
@@ -30,32 +31,50 @@ from tools.lr_scheduler import StepwiseLR
 
 def get_args():
     parser = argparse.ArgumentParser(description='PyTorch Domain Adaptation')
+    # data args
     parser.add_argument('--root', default='/home/pku1616/liny/PacBayesDan/data', help='root path of dataset')
     parser.add_argument('-d', '--data', metavar='DATA', default='Office31', help='dataset: ' + ' | '.join(dataset_names) +' (default: Office31)')
     parser.add_argument('-s', '--source', help='source domain(s)')
     parser.add_argument('-t', '--target', help='target domain(s)')
     parser.add_argument('-j', '--workers', default=2, type=int, metavar='N', help='number of data loading workers (default: 2)')
 
-
+    # training args
     parser.add_argument('--epochs', default=150, type=int, metavar='N', help='number of total epochs to run')
-    parser.add_argument('-i', '--iters-per-epoch', default=100, type=int, help='Number of iterations per epoch')
-    parser.add_argument('-b', '--batch-size', default=32, type=int, metavar='N', help='mini-batch size (default: 32)')
-    parser.add_argument('--lr', '--learning-rate',  default=0.003, type=float,metavar='LR', help='initial learning rate', dest='lr')
+    parser.add_argument('-i', '--iters_per_epoch', default=100, type=int, help='Number of iterations per epoch')
+    parser.add_argument('-b', '--batch_size', default=32, type=int, metavar='N', help='mini-batch size (default: 32)')
+    parser.add_argument('--lr', '--learning_rate',  default=0.003, type=float,metavar='LR', help='initial learning rate', dest='lr')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',help='momentum')
-    parser.add_argument('--wd', '--weight-decay', default=0.0005, type=float, metavar='W', help='weight decay (default: 5e-4)')
+    parser.add_argument('--wd', '--weight_decay', default=0.0005, type=float, metavar='W', help='weight decay (default: 5e-4)')
+    parser.add_argument('--gamma', default=0.0003, type=float)
+    parser.add_argument('--decat_rate', default=0.75, type=float)
 
+    # model args
     parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50', choices=architecture_names)
+    parser.add_argument('--bottleneck_dim', default=256, type=int)
+    parser.add_argument('--classifier_width', default=256, type=int)
+    parser.add_argument('--dropout_rate', default=0.5, type=float)
+    parser.add_argument('--dropout_type', default='Bernoulli', type=str)
+    parser.add_argument('--freeze_backbone', default=False, type=bool)
+
+    # loss args
     parser.add_argument('--lambda1', default=1., type=float, help='the trade-off hyper-parameter for transfer loss')
     parser.add_argument('--lambda2', default=1., type=float, help='the trade-off hyper-parameter for joint loss')
     parser.add_argument('--linear', default=False, action='store_true',  help='whether use the linear version')
-    parser.add_argument('--start_epoch', default=5, type=int)
-    parser.add_argument('--pseudo_threshold', default=0.75, type=float)
-    parser.add_argument('--is_ema', default=False, type=bool)
-    parser.add_argument('--alpha', default=0.1, type=float, help='EMA of pseudo label')
-    parser.add_argument('--gamma_c', default=0.9, type=float, help='EMA of time consistency')
-    parser.add_argument('--sample_num', default=3, type=int)
+    parser.add_argument('--loss_sample_num', default=3, type=int, help='number of models sampled to calcualate loss')
 
-    parser.add_argument('-p', '--print-freq', default=20, type=int, metavar='N', help='print frequency (default: 100)')
+    # pseudo args
+    parser.add_argument('--start_epoch', default=5, type=int)
+    parser.add_argument('--prob_ema', default=False, type=bool)
+    parser.add_argument('--prob_ema_gamma', default=0.1, type=float, help='EMA of pseudo label')
+    parser.add_argument('--prob_type', default='epoch_update', type=str, choices=['prediction', 'prediction_avg', 'source_prototype', 'target_prototype'])
+    parser.add_argument('--weights_type', default='uncertainty', type=str, choices=['uncertainty', 'entropy', 'threshold', 'max_value', 'time_consistency'])
+    parser.add_argument('--threshold', default=0.75, type=float)
+    parser.add_argument('--tc_ema_gamma', default=0.9, type=float, help='EMA of time consistency')
+    parser.add_argument('--uncertainty_type', default='predictive_entropy', type='str', choices=['predictive_entropy', 'mutual_info', 'variation_ratio'])
+    parser.add_argument('--uncertainty_sample_num', default=100, type=int, help='number of models sampled to calcualate uncertainty')
+
+    # other args
+    parser.add_argument('-p', '--print_freq', default=20, type=int, metavar='N', help='print frequency (default: 100)')
     parser.add_argument('--seed', default=0, type=int, help='seed for initializing training. ')
     parser.add_argument('--gpu', default='2', type=str)
 
@@ -104,7 +123,7 @@ def main(args: argparse.Namespace):
 
     #pseudo labels
     pseudo_labels = PseudoLabeling(len(train_target_dataset), train_target_dataset.num_classes,
-                                   args.alpha, args.gamma_c, args.pseudo_threshold, device)
+                                   args.prob_ema_gamma, args.tc_ema_gamma, args.threshold, device)
 
     # create model
     print("=> using pre-trained model '{}'".format(args.arch))
@@ -124,7 +143,7 @@ def main(args: argparse.Namespace):
     # define optimizer
     parameters = classifier.get_parameters()
     optimizer = SGD(parameters, args.lr, momentum=args.momentum, weight_decay=args.wd, nesterov=True)
-    lr_sheduler = StepwiseLR(optimizer, init_lr=args.lr, gamma=0.0003, decay_rate=0.75)
+    lr_sheduler = StepwiseLR(optimizer, init_lr=args.lr, gamma=args.gamma, decay_rate=args.decay_rate)
 
     # start training
     best_acc1 = 0.
@@ -135,7 +154,6 @@ def main(args: argparse.Namespace):
         train(train_source_iter, train_target_iter, classifier, jmmd_loss, optimizer,
               lr_sheduler, pseudo_labels, epoch, args)
 
-        # evaluate on validation set
         acc1 = validate(val_loader, classifier, args)
 
         # remember best acc@1 and save checkpoint
@@ -230,18 +248,18 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
             weights_t = F.softmax(weights_t, dim=0)
             
             ys_mc = []
-            for j in range(args.sample_num):
+            for j in range(args.loss_sample_num):
                 y_mc, _ = model.head_forward(h)
                 ys_mc.append(y_mc)
 
             joint_loss = 0.0
-            for j in range(args.sample_num):
-                for k in range(j+1, args.sample_num):
+            for j in range(args.loss_sample_num):
+                for k in range(j+1, args.loss_sample_num):
                     y1_s, y1_t = ys_mc[j].chunk(2, dim=0)
                     y2_s, y2_t = ys_mc[k].chunk(2, dim=0)
                     joint_loss += jointdisagreement(y1_s, y1_t, y2_s, y2_t, labels_s, pseudo_labels_t, weights_t)
 
-            joint_loss = joint_loss* 2.0 / ((args.sample_num-1.0)*args.sample_num)
+            joint_loss = joint_loss* 2.0 / ((args.loss_sample_num-1.0)*args.loss_sample_num)
             loss += joint_loss * args.lambda2
 
 
@@ -267,7 +285,6 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         #if epoch>=args.start_epoch-1:
         #    ITERATION_update_pseudo_label(x_t, index_t, model, pseudo_labels, args, epoch)
 
-
         if i % args.print_freq == 0:
             progress.display(i)
 
@@ -280,7 +297,6 @@ def validate(val_loader: DataLoader, model: nn.Module, args: argparse.Namespace)
         [losses, top1, top5],
         prefix='Test: ')
 
-    # switch to evaluate mode
     model.eval()
 
     with torch.no_grad():
@@ -301,45 +317,102 @@ def validate(val_loader: DataLoader, model: nn.Module, args: argparse.Namespace)
             if i % args.print_freq == 0:
                 progress.display(i)
 
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-              .format(top1=top1, top5=top5))
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
 
     return top1.avg
 
+def psudo_label_update_and_weight_calculate(train_source_loader, val_loader, model, pseudo_labels, args, epoch):
+    if args.prob_type == 'prediction':
+        EPOCH_update_pseudo_label(val_loader, model, pseudo_labels, args, epoch)
+    elif args.prob_type == 'source_prototype':
+        EPOCH_PROTOTYPE_S_update(train_source_loader, val_loader, classifier, pseudo_labels, args, epoch)
+    elif args.prob_type == 'target_prototype':
+        EPOCH_PROTOTYPE_T_update(val_loader, model, pseudo_labels, args, epoch)
+    elif args.prob_type == 'prediction_avg':
+        assert args.weights_type == 'uncertainty'
+        pass
+    else:
+        raise ValueError(f'pesudo label unpdate type not found')
+
+                    # pseudo_labels.threshold_weight()
+                #pseudo_labels.difference_to_one_weight()
+                weights_t = pseudo_labels.get_weight(index_t)
+
+    if args.weights_type == 'uncertainty':
+
+    elif args.weights_type == 'entropy':
+        pseudo_labels.entropy_weight()
+    elif args.weights_type =='threshold':
+        pseudo_labels.threshold_weight()
+    elif args.weights_type == 'max_value':
+        pseudo_labels.difference_to_one_weight()
+    elif args.weights_type == 'time_consistency':
+        pseudo_labels.time_consistency_weight():
+    else:
+        raise ValueError(f'pesudo label weight unpdate type not found')
+
+def uncertainty_update(target_loader: DataLoader, model: nn.Module, pseudo_labels: PseudoLabeling, args, epoch):
+    model.eval()
+    model.activate_dropout()
+
+    with torch.no_grad():
+        for i, (images, target, index) in enumerate(loader):
+            images = images.to(device)
+            ys = []
+            for j in range(args.uncertainty_sample_num):
+                y, _ = model(images)
+                y = F.softmax(y, dim=1)
+                ys.append(y)
+            ys = torch.cat(ys, 0)
+            y = torch.mean(ys, 0)
+
+            if args.prob_type == 'prediction_avg'
+                if args.prob_ema==True:
+                    pseudo_labels.EMA_update_p(y, index, epoch)
+                else:
+                    pseudo_labels.update_p(y, index)
+            
+            if args.uncertainty_type == 'predictive_entropy':
+                uncertainty = PredictiveEntropy(ys)
+            elif args.uncertainty_type == 'mutual_info':
+                uncertainty = MutualInfo(ys)
+            elif args.uncertainty_type == 'variation_ratio':
+                uncertainty = VariationRatio(ys, device)
+            else:
+                raise ValueError(f'uncertainty type not found')
+            
+            pseudo_labels.update_weight(-1.0*uncertainty, index)
+            
+
 def EPOCH_update_pseudo_label(loader: DataLoader, model: nn.Module, pseudo_labels: PseudoLabeling, args, epoch):
     model.eval()
-
     with torch.no_grad():
         for i, (images, target, index) in enumerate(loader):
             images = images.to(device)
             target = target.to(device)
             y, _ = model(images)
             y = F.softmax(y, dim=1)
-            if args.is_ema==True:
+            if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(y, index, epoch)
             else:
                 pseudo_labels.update_p(y, index)
 
-def ITERATION_update_pseudo_label(x_t: torch.Tensor, index_t: torch.Tensor, model: nn.Module,
-                                  pseudo_labels: PseudoLabeling, args, epoch):
+def ITERATION_update_pseudo_label(x_t: torch.Tensor, index_t: torch.Tensor, model: nn.Module, pseudo_labels: PseudoLabeling, args, epoch):
     model.eval()
-
     with torch.no_grad():
         y_t, _ = model(x_t)
         y = F.softmax(y_t, dim=1)
-        y = F.softmax(y, dim=1)
-        if args.is_ema == True:
+        if args.prob_ema == True:
             pseudo_labels.EMA_update_p(y, index_t, epoch)
         else:
             pseudo_labels.update_p(y, index_t)
 
-def calculate_source_prototype(source_loader: DataLoader, model: nn.Module):
+def EPOCH_PROTOTYPE_S_update(source_loader:DataLoader, target_loader:DataLoader, model:nn.Module, pseudo_labels:PseudoLabeling, args, epoch):
     model.eval()
     num_classes = model.num_classes
     features_dim = model.features_dim
     count = [0]*num_classes
     prototype_s = torch.zeros((num_classes, features_dim), device=device)
-
 
     with torch.no_grad():
         for i, (images, target, index) in enumerate(source_loader):
@@ -354,29 +427,20 @@ def calculate_source_prototype(source_loader: DataLoader, model: nn.Module):
         for i in range(prototype_s.shape[0]):
             prototype_s[i] = prototype_s[i]/count[i]
 
-    return prototype_s    #(num_classes, features_dim)
-
-def EPOCH_PROTOTYPE_S_update(prototype_s:torch.Tensor, loader:DataLoader, model:nn.Module,
-                             pseudo_labels:PseudoLabeling, args, epoch):
-    model.eval()
-
-    with torch.no_grad():
-        for i, (images, target, index) in enumerate(loader):
+        for i, (images, target, index) in enumerate(target_loader):
             images = images.to(device)
             target = target.to(device)
             y, f = model(images)
-            prediction = torch.zeros_like(y)    #(batch_size, num_classes)
-            for j in range(prediction.shape[0]):
-                for k in range(prediction.shape[1]):
-                    prediction[j,k] = torch.exp(-torch.norm(f[j]-prototype_s[k], 2))
-                prediction[j] = prediction[j]/torch.sum(prediction[j])
 
-            if args.is_ema==True:
+            prediction = ((f.unsqueeze(1) - prototype_s.unsqueeze(0)) ** 2).sum(2).pow(0.5)
+            prediction = F.softmax(prediction, 1)
+
+            if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(prediction, index, epoch)
             else:
                 pseudo_labels.update_p(prediction, index)
 
-def EPOCH_PROTOTYPE_T_update(loader: DataLoader, model: nn.Module, pseudo_labels: PseudoLabeling, args, epoch):
+def EPOCH_PROTOTYPE_T_update(target_loader: DataLoader, model: nn.Module, pseudo_labels: PseudoLabeling, args, epoch):
     model.eval()
     num_classes = model.num_classes
     features_dim = model.features_dim
@@ -384,7 +448,7 @@ def EPOCH_PROTOTYPE_T_update(loader: DataLoader, model: nn.Module, pseudo_labels
     prototype_t = torch.zeros((num_classes, features_dim), device=device)
 
     with torch.no_grad():
-        for i, (images, target, index) in enumerate(loader):
+        for i, (images, target, index) in enumerate(target_loader):
             images = images.to(device)
             target = target.to(device)
             y, f = model(images)
@@ -402,18 +466,15 @@ def EPOCH_PROTOTYPE_T_update(loader: DataLoader, model: nn.Module, pseudo_labels
         for i in range(prototype_t.shape[0]):
             prototype_t[i] = prototype_t[i]/count[i]
 
-        for i, (images, target, index) in enumerate(loader):
+        for i, (images, target, index) in enumerate(target_loader):
             images = images.to(device)
             target = target.to(device)
-            y1, f1, y2, f2 = model(images)
-            f = 0.5*f1 + 0.5*f2
-            prediction = torch.zeros_like(y1)    #(batch_size, num_classes)
-            for j in range(prediction.shape[0]):
-                for k in range(prediction.shape[1]):
-                    prediction[j,k] = torch.exp(-torch.norm(f[j]-prototype_t[k], 2))
-                prediction[j] = prediction[j]/torch.sum(prediction[j])
+            y, f = model(images)
 
-            if args.is_ema==True:
+            prediction = ((f.unsqueeze(1) - prototype_s.unsqueeze(0)) ** 2).sum(2).pow(0.5)
+            prediction = F.softmax(prediction, 1)
+
+            if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(prediction, index, epoch)
             else:
                 pseudo_labels.update_p(prediction, index)
@@ -483,7 +544,7 @@ def PROTOTYPE_MAXST_update(source_loader: DataLoader, val_loader: DataLoader, mo
                 else:
                     prediction[j] = prediction_t[j]
 
-            if args.is_ema==True:
+            if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(prediction, index, epoch)
             else:
                 pseudo_labels.update_p(prediction, index)
@@ -511,44 +572,10 @@ def PROTOTYPE_MATRIX_update(loader: DataLoader, model: nn.Module, pseudo_labels:
                     prediction[j,k] = torch.exp(-20.0*dist)
                 prediction[j] = prediction[j]/torch.sum(prediction[j])
 
-            if args.is_ema==True:
+            if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(prediction, index, epoch)
             else:
                 pseudo_labels.update_p(prediction, index)
-
-# def print_class_distribution(source_loader: DataLoader, val_loader: DataLoader, model: nn.Module,
-#                              pseudo_labels: PseudoLabeling):
-#     model.eval()
-#     num_classes = model.num_classes
-#     count_s = [0] * num_classes
-#     count_t = [0] * num_classes
-#     for i, (images, target, index) in enumerate(source_loader):
-#         for j in range(target.shape[0]):
-#             count_s[int(target[j].item())] += 1
-#     for i, (images, target, index) in enumerate(val_loader):
-#         for j in range(target.shape[0]):
-#             count_t[int(target[j].item())] += 1
-#     count_tp = pseudo_labels.count_t()
-
-#     ns = np.array(count_s)
-#     nt = np.array(count_t)
-#     ntp = np.array(count_tp)
-#     ns = ns/sum(ns)
-#     nt = nt/sum(nt)
-#     ntp = ntp/sum(ntp)
-
-#     classes = np.arange(num_classes)
-#     plt.bar(classes, ns, color='blue')
-#     plt.title('Source domain')
-#     plt.savefig('source.png')
-#     plt.clf()
-#     plt.bar(classes, nt, color='green')
-#     plt.title('Target domain')
-#     plt.savefig('target.png')
-#     plt.clf()
-#     plt.bar(classes, ntp, color='red')
-#     plt.title('Pseudo label')
-#     plt.savefig('pseudo.png')
 
 
 if __name__ == '__main__':
