@@ -1,0 +1,86 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from typing import Tuple, Optional, List, Dict
+
+class MCdropClassifier(nn.Module):
+    def __init__(self, 
+                backbone: nn.Module,
+                num_classes: int,
+                bottleneck_dim: Optional[int] = 256,
+                classifier_width: Optional[int] = 256,
+                dropout_rate: Optional[float] = 0.5,
+                dropout_type: Optional[str]='Bernoulli'):
+        super(MCdropClassifier, self).__init__()
+
+        self.num_classes = num_classes
+        self.bottleneck_dim = bottleneck_dim
+        self.classifier_width = classifier_width
+        self.dropout_rate = dropout_rate
+        self.dropout_type = dropout_type
+
+        self.backbone = backbone
+        
+        self.bottleneck_fc = nn.Linear(backbone.out_features, bottleneck_dim)
+        self.bottleneck_drop = self._make_dropout(dropout_rate, dropout_type)
+        self.bottleneck_act = nn.Sequential(
+            nn.BatchNorm1d(bottleneck_dim),
+            nn.ReLU()
+        )
+        self.bottleneck_layer =  nn.Sequential(
+            self.bottleneck_fc,
+            self.bottleneck_drop,
+            self.bottleneck_act
+        )
+
+        self.classifier_fc = nn.Linear(bottleneck_dim, classifier_width)
+        self.classifier_drop = self._make_dropout(dropout_rate, dropout_type)
+        self.classifier_act = nn.ReLU()
+        self.classifier_layer =  nn.Sequential(
+            self.classifier_fc,
+            self.classifier_drop,
+            self.classifier_act
+        )
+
+        self.predition_layer = nn.Linear(classifier_width, num_classes)
+    
+    @property
+    def features_dim(self) -> int:
+        """The dimension of features before the final `head` layer"""
+        return self.classifier_width
+    
+    def _make_dropout(self, dropout_rate, dropout_type) -> nn.Module:
+        if dropout_type == 'Bernoulli':
+            return nn.Dropout(dropout_rate)
+        else:
+            raise ValueError(f'Dropout type not found')
+
+
+    def forward(self, x) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self.backbone(x)
+        x = x.view(-1, self.backbone.out_features)
+        hidden = self.bottleneck_layer(x)
+        # hidden = self.classifier_layer(hidden)
+        pred = self.predition_layer(hidden)
+        return pred, hidden
+    
+    def backbone_forward(self, x) -> torch.Tensor:
+        x = self.backbone(x)
+        x = x.view(-1, self.backbone.out_features)
+        return x
+    
+    def head_forward(self, x) -> Tuple[torch.Tensor, torch.Tensor]:
+        hidden = self.bottleneck_layer(x)
+        # hidden = self.classifier_layer(hidden)
+        pred = self.predition_layer(hidden)
+        return pred, hidden
+    
+    def get_parameters(self) -> List[Dict]:
+        params = [
+            {"params": self.backbone.parameters(), "lr_mult": 0.1},
+            {"params": self.bottleneck_layer.parameters(), "lr_mult": 1.},
+            {"params": self.classifier_layer.parameters(), "lr_mult": 1.},
+            {"params": self.predition_layer.parameters(), "lr_mult": 1.},
+        ]
+        return params
