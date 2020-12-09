@@ -59,12 +59,12 @@ def get_args():
 
     # loss args
     parser.add_argument('--lambda1', default=1., type=float, help='the trade-off hyper-parameter for transfer loss')
-    parser.add_argument('--lambda2', default=0.1, type=float, help='the trade-off hyper-parameter for joint loss')
+    parser.add_argument('--lambda2', default=0.0, type=float, help='the trade-off hyper-parameter for joint loss')
     parser.add_argument('--linear', default=False, action='store_true',  help='whether use the linear version')
     parser.add_argument('--loss_sample_num', default=3, type=int, help='number of models sampled to calcualate loss')
 
     # pseudo args
-    parser.add_argument('--start_epoch', default=2, type=int)
+    parser.add_argument('--start_epoch', default=10000, type=int)
     parser.add_argument('--prob_ema', default=False, type=bool)
     parser.add_argument('--prob_ema_gamma', default=0.1, type=float, help='EMA of pseudo label')
     parser.add_argument('--prob_type', default='prediction', type=str, choices=['prediction', 'prediction_avg', 'source_prototype', 'target_prototype'])
@@ -130,16 +130,21 @@ def main(args: argparse.Namespace):
     print("=> using pre-trained model '{}'".format(args.arch))
     backbone = models.__dict__[args.arch](pretrained=True)
     num_classes = train_source_dataset.num_classes
-    model = MCdropClassifier(backbone, num_classes).to(device)
+    model = MCdropClassifier(backbone=backbone,
+                            num_classes=num_classes,
+                            bottleneck_dim=args.bottleneck_dim,
+                            classifier_width=args.classifier_width,
+                            dropout_rate=args.dropout_rate,
+                            dropout_type=args.dropout_type).to(device)
 
     # define loss function
-    # jmmd_loss = JointMultipleKernelMaximumMeanDiscrepancy(
-    #     kernels=(
-    #         [GaussianKernel(alpha=2 ** k) for k in range(-3, 2)],
-    #         (GaussianKernel(sigma=0.92, track_running_stats=False),)
-    #     ),
-    #     linear=args.linear, thetas=None
-    # ).to(device)
+    jmmd_loss = JointMultipleKernelMaximumMeanDiscrepancy(
+        kernels=(
+            [GaussianKernel(alpha=2 ** k) for k in range(-3, 2)],
+            (GaussianKernel(sigma=0.92, track_running_stats=False),)
+        ),
+        linear=args.linear, thetas=None
+    ).to(device)
 
     # define optimizer
     parameters = model.get_parameters()
@@ -153,7 +158,7 @@ def main(args: argparse.Namespace):
         pseudo_labels.copy_history()
 
         # train for one epoch
-        train(train_source_iter, train_target_iter, model, optimizer, lr_sheduler, pseudo_labels, epoch, args)
+        train(train_source_iter, train_target_iter, model, jmmd_loss, optimizer, lr_sheduler, pseudo_labels, epoch, args)
 
         acc1 = validate(val_loader, model, args)
 
@@ -161,6 +166,8 @@ def main(args: argparse.Namespace):
         if acc1 > best_acc1:
             best_model = copy.deepcopy(model.state_dict())
             best_acc1 = acc1
+            print('find best!')
+        print("current best = {:3.3f}".format(best_acc1))
 
     print("best_acc1 = {:3.3f}".format(best_acc1))
 
@@ -169,7 +176,7 @@ def main(args: argparse.Namespace):
     acc1 = validate(test_loader, model, args)
     print("test_acc1 = {:3.3f}".format(acc1))
 
-def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverDataIterator, model: nn.Module,
+def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverDataIterator, model: nn.Module, jmmd_loss,
          optimizer: SGD, lr_sheduler: StepwiseLR, pseudo_labels: PseudoLabeling, epoch: int, args: argparse.Namespace):
     losses = AverageMeter('Loss', ':3.2f')
     cls_losses = AverageMeter('Cls Loss', ':3.2f')
@@ -183,7 +190,6 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         [losses, cls_losses, trans_losses, joint_losses, cls_accs, tgt_accs],
         prefix="Epoch: [{}]".format(epoch))
 
-    # switch to train mode
     model.train()
     # jmmd_loss.train()
 
@@ -210,11 +216,11 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         cls_loss = F.cross_entropy(y_s, labels_s)
         loss += cls_loss
 
-        # transfer_loss = jmmd_loss(
-        #     (f_s, F.softmax(y_s, dim=1)),
-        #     (f_t, F.softmax(y_t, dim=1))
-        # )
-        # loss += transfer_loss * args.lambda1
+        transfer_loss = jmmd_loss(
+            (f_s, F.softmax(y_s, dim=1)),
+            (f_t, F.softmax(y_t, dim=1))
+        )
+        loss += transfer_loss * args.lambda1
 
         if epoch >= args.start_epoch:
             with torch.no_grad():
@@ -244,8 +250,8 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         cls_accs.update(cls_acc.item(), x_s.size(0))
         tgt_accs.update(tgt_acc.item(), x_t.size(0))
         cls_losses.update(cls_loss.item(), x_s.size(0))
-        # trans_losses.update(transfer_loss.item(), x_s.size(0))
-        trans_losses.update(0.0, x_s.size(0))
+        trans_losses.update(transfer_loss.item(), x_s.size(0))
+        # trans_losses.update(0.0, x_s.size(0))
         try:
             joint_losses.update(joint_loss.item(), x_s.size(0))
         except:

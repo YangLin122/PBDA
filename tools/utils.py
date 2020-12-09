@@ -3,14 +3,17 @@ import torch
 import os
 import shutil
 import random
+import numpy as np
 import torch.backends.cudnn as cudnn
 from torch.utils.data.dataloader import DataLoader
 sys.path.append('.')
 
 def setup_seed(seed=None):
     if seed is not None:
+        np.random.seed(seed)
         random.seed(seed)
         torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
         cudnn.deterministic = True
         # warnings.warn('You have chosen to seed training. '
         #               'This will turn on the CUDNN deterministic setting, '

@@ -77,23 +77,23 @@ class N_Way_K_Shot_BatchSampler(Sampler):
 
 
 class SelfTrainingBaseSampler(Sampler):
-	def __init__(self, max_iter, task_sampler, pseudo_set):
+	def __init__(self, max_iter, task_sampler, pseudo_labels):
 		self.max_iter = max_iter
 		self.task_sampler = task_sampler
-		self.pseudo_set = pseudo_set
+		self.pseudo_labels = pseudo_labels
 
 	def __iter__(self):
 		for _ in range(self.max_iter):
 			batch = []
 			classes = self.task_sampler.sample_N_classes_as_a_task()
 			for c in classes:
-				if c not in self.pseudo_set.lable_dict or not self.pseudo_set.lable_dict[c]:
+				if c not in self.pseudo_labels.lable_dict or not self.pseudo_labels.lable_dict[c]:
 					continue
 				samples_for_this_class = self.sample_examples_by_class(c)
 				batch.extend(samples_for_this_class)
 
 			if len(batch) < self.task_sampler.batch_size:
-				random_samples = random.sample(range(len(self.pseudo_set.set_size)), self.task_sampler.batch_size - len(batch))
+				random_samples = random.sample(range(len(self.pseudo_labels.set_size)), self.task_sampler.batch_size - len(batch))
 				batch.extend(random_samples)
 
 			yield batch
@@ -103,39 +103,39 @@ class SelfTrainingBaseSampler(Sampler):
 
 
 class SelfTrainingVannilaSampler(SelfTrainingBaseSampler):
-	def __init__(self, max_iter, task_sampler, pseudo_set):
-		super().__init__(max_iter, task_sampler, pseudo_set)
+	def __init__(self, max_iter, task_sampler, pseudo_labels):
+		super().__init__(max_iter, task_sampler, pseudo_labels)
 
     def sample_examples_by_class(self, c):
-        if self.task_sampler.k_shot <= len(self.pseudo_label_dict[c]):
-            sampled_examples = random.sample(self.pseudo_label_dict[c],
+        if self.task_sampler.k_shot <= len(self.pseudo_labels.lable_dict[c]):
+            sampled_examples = random.sample(self.pseudo_labels.lable_dict[c],
                                              self.task_sampler.k_shot)  # sample without replacement
         else:
-            sampled_examples = random.choices(self.pseudo_label_dict[c],
+            sampled_examples = random.choices(self.pseudo_labels.lable_dict[c],
                                               k=self.task_sampler.k_shot)  # sample with replacement
         return sampled_examples
 
 
 class SelfTrainingConfidentSampler(SelfTrainingBaseSampler):
-	def __init__(self, max_iter, task_sampler, pseudo_set):
-        super().__init__(max_iter, task_sampler, pseudo_set)
+	def __init__(self, max_iter, task_sampler, pseudo_labels):
+        super().__init__(max_iter, task_sampler, pseudo_labels)
 
     def sample_examples_by_class(self, c):
-		k = min(self.task_sampler.k_shot, len(self.pseudo_set.label_dict[c]))
-		confidents = self.pseudo_set.get_wt(self.pseudo_set.lable_dict[c])
+		k = min(self.task_sampler.k_shot, len(self.pseudo_labels.label_dict[c]))
+		confidents = self.pseudo_labels.get_weight(self.pseudo_labels.lable_dict[c])
 		top_k_indices_for_this_cls = confidents.argsort()[:k]
-        top_k_indices = [self.pseudo_set.lable_dict[c][i] for i in top_k_indices_for_this_cls]
+        top_k_indices = [self.pseudo_labels.lable_dict[c][i] for i in top_k_indices_for_this_cls]
         return top_k_indices
 
 
 class SelfTrainingUnConfidentSampler(SelfTrainingBaseSampler):
-    def __init__(self, max_iter, task_sampler, pseudo_set):
-        super().__init__(max_iter, task_sampler, pseudo_set)
+    def __init__(self, max_iter, task_sampler, pseudo_labels):
+        super().__init__(max_iter, task_sampler, pseudo_labels)
 
     def sample_examples_by_class(self, cls):
-		k = min(self.task_sampler.k_shot, len(self.pseudo_set.label_dict[c]))
-		confidents = self.pseudo_set.get_wt(self.pseudo_set.lable_dict[c])
+		k = min(self.task_sampler.k_shot, len(self.pseudo_labels.label_dict[c]))
+		confidents = self.pseudo_labels.get_weight(self.pseudo_labels.lable_dict[c])
 		top_k_indices_for_this_cls = confidents.argsort()[::-1][:k]
-        top_k_indices = [self.pseudo_set.lable_dict[c][i] for i in top_k_indices_for_this_cls]
+        top_k_indices = [self.pseudo_labels.lable_dict[c][i] for i in top_k_indices_for_this_cls]
         return top_k_indices
 

@@ -5,11 +5,11 @@ import torch.functional as F
 import copy
 
 class PseudoLabeling(object):
-    def __init__(self, size, num_classes, alpha, gamma_c, threshold, device):
+    def __init__(self, size, num_classes, prob_ema_gamma, tc_ema_gamma, threshold, device):
         self.size = size
         self.num_classes = num_classes
-        self.alpha = alpha
-        self.gamma_c = gamma_c
+        self.prob_ema_gamma = prob_ema_gamma
+        self.tc_ema_gamma = tc_ema_gamma
         self.threshold = threshold
         self.t = 0
         self.device = device
@@ -42,17 +42,14 @@ class PseudoLabeling(object):
         log_odds_ratio = torch.abs(torch.log(confidence1) - torch.log(confidence2))
         at = (KL_div + log_odds_ratio)
         self.t += 1
-        self.ct = self.gamma_c*self.ct+ (1-self.gamma_c)*(-at)
-        self.weight = self.ct/(1.0-pow(self.gamma_c, self.t))
+        self.ct = self.tc_ema_gamma*self.ct+ (1-self.tc_ema_gamma)*(-at)
+        self.weight = self.ct/(1.0-pow(self.tc_ema_gamma, self.t))
 
     def update_p(self, prediction, index):
         self.p[index] = prediction
 
     def EMA_update_p(self, prediction, index, epoch):
-        if epoch>=10:
-            self.p[index] = self.alpha*self.p[index] + (1.0-self.alpha)*prediction
-        else:
-            self.p[index] = prediction
+        self.p[index] = self.prob_ema_gamma*self.p[index] + (1.0-self.prob_ema_gamma)*prediction
     
     def update_weight(self, weights, index):
         self.weight[index] = weights
@@ -73,4 +70,22 @@ class PseudoLabeling(object):
         for i in range(index.shape[0]):
             count_t[int(index[i].item())] += 1
         return count_t
+    
+    def build_label_dict(self):
+        y_prob, y_hat = torch.max(self.p,1)
+        if self.threshold is not None:
+            y_hat[y_prob < self.threshold] = -1
+		
+        self.label_dict = OrderedDict()
+        for i, label in enumerate(y_hat):
+            label = int(label)
+            if label not in self.label_dict:
+                self.label_dict[label] = [i]
+            else:
+                self.label_dict[label].append(i)
+        
+        # make sure there is no missing label
+        for i in range(self.num_classes):
+            if i not in self.label_dict:
+                self.label_dict[i] = []
 
