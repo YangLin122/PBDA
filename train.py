@@ -39,8 +39,8 @@ def get_args():
     parser.add_argument('-j', '--workers', default=2, type=int, metavar='N', help='number of data loading workers (default: 2)')
 
     # training args
-    parser.add_argument('--epochs', default=150, type=int, metavar='N', help='number of total epochs to run')
-    parser.add_argument('-i', '--iters_per_epoch', default=100, type=int, help='Number of iterations per epoch')
+    parser.add_argument('--epochs', default=30, type=int, metavar='N', help='number of total epochs to run')
+    parser.add_argument('-i', '--iters_per_epoch', default=500, type=int, help='Number of iterations per epoch')
     parser.add_argument('-b', '--batch_size', default=32, type=int, metavar='N', help='mini-batch size (default: 32)')
     parser.add_argument('--lr', '--learning_rate',  default=0.003, type=float,metavar='LR', help='initial learning rate', dest='lr')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',help='momentum')
@@ -58,24 +58,24 @@ def get_args():
     parser.add_argument('--freeze_backbone', default=False, type=bool)
 
     # loss args
-    parser.add_argument('--lambda1', default=1., type=float, help='the trade-off hyper-parameter for transfer loss')
-    parser.add_argument('--lambda2', default=0.0, type=float, help='the trade-off hyper-parameter for joint loss')
+    parser.add_argument('--lambda1', default=1.0, type=float, help='the trade-off hyper-parameter for transfer loss')
+    parser.add_argument('--lambda2', default=1.0, type=float, help='the trade-off hyper-parameter for joint loss')
     parser.add_argument('--linear', default=False, action='store_true',  help='whether use the linear version')
     parser.add_argument('--loss_sample_num', default=3, type=int, help='number of models sampled to calcualate loss')
 
     # pseudo args
-    parser.add_argument('--start_epoch', default=10000, type=int)
+    parser.add_argument('--start_epoch', default=10, type=int)
     parser.add_argument('--prob_ema', default=False, type=bool)
     parser.add_argument('--prob_ema_gamma', default=0.1, type=float, help='EMA of pseudo label')
-    parser.add_argument('--prob_type', default='prediction', type=str, choices=['prediction', 'prediction_avg', 'source_prototype', 'target_prototype'])
-    parser.add_argument('--weights_type', default='entropy', type=str, choices=['uncertainty', 'entropy', 'threshold', 'max_value', 'time_consistency'])
+    parser.add_argument('--prob_type', default='source_prototype', type=str, choices=['prediction', 'prediction_avg', 'source_prototype', 'target_prototype'])
+    parser.add_argument('--weights_type', default='threshold', type=str, choices=['uncertainty', 'entropy', 'threshold', 'max_value', 'time_consistency'])
     parser.add_argument('--threshold', default=0.75, type=float)
     parser.add_argument('--tc_ema_gamma', default=0.9, type=float, help='EMA of time consistency')
     parser.add_argument('--uncertainty_type', default='predictive_entropy', type=str, choices=['predictive_entropy', 'mutual_info', 'variation_ratio'])
     parser.add_argument('--uncertainty_sample_num', default=100, type=int, help='number of models sampled to calcualate uncertainty')
 
     # other args
-    parser.add_argument('-p', '--print_freq', default=20, type=int, metavar='N', help='print frequency (default: 100)')
+    parser.add_argument('-p', '--print_freq', default=50, type=int, metavar='N', help='print frequency (default: 100)')
     parser.add_argument('--seed', default=0, type=int, help='seed for initializing training. ')
     parser.add_argument('--gpu', default='2', type=str)
 
@@ -406,8 +406,8 @@ def EPOCH_PROTOTYPE_S_update(source_loader:DataLoader, target_loader:DataLoader,
             target = target.to(device)
             y, f = model(images)
 
-            prediction = ((f.unsqueeze(1) - prototype_s.unsqueeze(0)) ** 2).sum(2).pow(0.5)
-            prediction = F.softmax(prediction, 1)
+            dist = ((f.unsqueeze(1) - prototype_s.unsqueeze(0)) ** 2).sum(2).pow(0.5)
+            prediction = F.softmax(-dist, 1)
 
             if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(prediction, index, epoch)
@@ -445,8 +445,8 @@ def EPOCH_PROTOTYPE_T_update(target_loader: DataLoader, model: nn.Module, pseudo
             target = target.to(device)
             y, f = model(images)
 
-            prediction = ((f.unsqueeze(1) - prototype_s.unsqueeze(0)) ** 2).sum(2).pow(0.5)
-            prediction = F.softmax(prediction, 1)
+            dist = ((f.unsqueeze(1) - prototype_s.unsqueeze(0)) ** 2).sum(2).pow(0.5)
+            prediction = F.softmax(-dist, 1)
 
             if args.prob_ema==True:
                 pseudo_labels.EMA_update_p(prediction, index, epoch)
