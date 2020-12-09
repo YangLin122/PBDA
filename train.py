@@ -18,9 +18,9 @@ import numpy as np
 # import matplotlib.pyplot as plt
 
 sys.path.append('.')
-from adaptation.pac_bayes import jointdisagreement
+from adaptation.pac_bayes import jointdisagreement, CE_disagreement, SQ_disagreement
 from adaptation.pseudo_labeling import PseudoLabeling
-from adaptation,uncertainty import VariationRatio, PredictiveEntropy, MutualInfo
+from adaptation.uncertainty import VariationRatio, PredictiveEntropy, MutualInfo
 from modules.kernels import JointMultipleKernelMaximumMeanDiscrepancy, GaussianKernel
 from modules.classifier import MCdropClassifier
 import vision.datasets as datasets
@@ -45,8 +45,9 @@ def get_args():
     parser.add_argument('--lr', '--learning_rate',  default=0.003, type=float,metavar='LR', help='initial learning rate', dest='lr')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',help='momentum')
     parser.add_argument('--wd', '--weight_decay', default=0.0005, type=float, metavar='W', help='weight decay (default: 5e-4)')
+    parser.add_argument('--gradclip', default=-1.0, type=float)
     parser.add_argument('--gamma', default=0.0003, type=float)
-    parser.add_argument('--decat_rate', default=0.75, type=float)
+    parser.add_argument('--decay_rate', default=0.75, type=float)
 
     # model args
     parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50', choices=architecture_names)
@@ -58,19 +59,19 @@ def get_args():
 
     # loss args
     parser.add_argument('--lambda1', default=1., type=float, help='the trade-off hyper-parameter for transfer loss')
-    parser.add_argument('--lambda2', default=1., type=float, help='the trade-off hyper-parameter for joint loss')
+    parser.add_argument('--lambda2', default=0.1, type=float, help='the trade-off hyper-parameter for joint loss')
     parser.add_argument('--linear', default=False, action='store_true',  help='whether use the linear version')
     parser.add_argument('--loss_sample_num', default=3, type=int, help='number of models sampled to calcualate loss')
 
     # pseudo args
-    parser.add_argument('--start_epoch', default=5, type=int)
+    parser.add_argument('--start_epoch', default=2, type=int)
     parser.add_argument('--prob_ema', default=False, type=bool)
     parser.add_argument('--prob_ema_gamma', default=0.1, type=float, help='EMA of pseudo label')
-    parser.add_argument('--prob_type', default='epoch_update', type=str, choices=['prediction', 'prediction_avg', 'source_prototype', 'target_prototype'])
-    parser.add_argument('--weights_type', default='uncertainty', type=str, choices=['uncertainty', 'entropy', 'threshold', 'max_value', 'time_consistency'])
+    parser.add_argument('--prob_type', default='prediction', type=str, choices=['prediction', 'prediction_avg', 'source_prototype', 'target_prototype'])
+    parser.add_argument('--weights_type', default='entropy', type=str, choices=['uncertainty', 'entropy', 'threshold', 'max_value', 'time_consistency'])
     parser.add_argument('--threshold', default=0.75, type=float)
     parser.add_argument('--tc_ema_gamma', default=0.9, type=float, help='EMA of time consistency')
-    parser.add_argument('--uncertainty_type', default='predictive_entropy', type='str', choices=['predictive_entropy', 'mutual_info', 'variation_ratio'])
+    parser.add_argument('--uncertainty_type', default='predictive_entropy', type=str, choices=['predictive_entropy', 'mutual_info', 'variation_ratio'])
     parser.add_argument('--uncertainty_sample_num', default=100, type=int, help='number of models sampled to calcualate uncertainty')
 
     # other args
@@ -129,70 +130,47 @@ def main(args: argparse.Namespace):
     print("=> using pre-trained model '{}'".format(args.arch))
     backbone = models.__dict__[args.arch](pretrained=True)
     num_classes = train_source_dataset.num_classes
-    classifier = MCdropClassifier(backbone, num_classes).to(device)
+    model = MCdropClassifier(backbone, num_classes).to(device)
 
     # define loss function
-    jmmd_loss = JointMultipleKernelMaximumMeanDiscrepancy(
-        kernels=(
-            [GaussianKernel(alpha=2 ** k) for k in range(-3, 2)],
-            (GaussianKernel(sigma=0.92, track_running_stats=False),)
-        ),
-        linear=args.linear, thetas=None
-    ).to(device)
+    # jmmd_loss = JointMultipleKernelMaximumMeanDiscrepancy(
+    #     kernels=(
+    #         [GaussianKernel(alpha=2 ** k) for k in range(-3, 2)],
+    #         (GaussianKernel(sigma=0.92, track_running_stats=False),)
+    #     ),
+    #     linear=args.linear, thetas=None
+    # ).to(device)
 
     # define optimizer
-    parameters = classifier.get_parameters()
+    parameters = model.get_parameters()
     optimizer = SGD(parameters, args.lr, momentum=args.momentum, weight_decay=args.wd, nesterov=True)
     lr_sheduler = StepwiseLR(optimizer, init_lr=args.lr, gamma=args.gamma, decay_rate=args.decay_rate)
 
     # start training
     best_acc1 = 0.
     for epoch in range(args.epochs):
+        psudo_label_update_and_weight_calculate(train_source_loader, val_loader, model, pseudo_labels, args, epoch)
         pseudo_labels.copy_history()
 
         # train for one epoch
-        train(train_source_iter, train_target_iter, classifier, jmmd_loss, optimizer,
-              lr_sheduler, pseudo_labels, epoch, args)
+        train(train_source_iter, train_target_iter, model, optimizer, lr_sheduler, pseudo_labels, epoch, args)
 
-        acc1 = validate(val_loader, classifier, args)
+        acc1 = validate(val_loader, model, args)
 
         # remember best acc@1 and save checkpoint
         if acc1 > best_acc1:
-            best_model = copy.deepcopy(classifier.state_dict())
-        best_acc1 = max(acc1, best_acc1)
-
-        # calculate source prototype and update pseudo labels according to prototype_s
-        prototype_s = calculate_source_prototype(train_source_loader, classifier)
-        prototype_s = prototype_s.to(device)
-        EPOCH_PROTOTYPE_S_update(prototype_s, val_loader, classifier, pseudo_labels, args, epoch)
-        #if epoch>=args.start_epoch-1:
-        #    EPOCH_PROTOTYPE_S_update(prototype_s, val_loader, classifier, pseudo_labels, args, epoch)
-
-        # calculate target prototype and update pseudo labels according to prototype_t
-        #EPOCH_PROTOTYPE_T_update(val_loader, classifier, pseudo_labels, args, epoch)
-        #if epoch>=args.start_epoch-1:
-        #    EPOCH_PROTOTYPE_T_update(val_loader, classifier, pseudo_labels, args, epoch)
-
-        #PROTOTYPE_MAXST_update(train_source_loader, val_loader, classifier, pseudo_labels, args, epoch)
-
-        #PROTOTYPE_MATRIX_update(val_loader, classifier, pseudo_labels, args, epoch)
-
-        # EPOCH_update_pseudo_label(val_loader, classifier, pseudo_labels, args, epoch)
-        #if epoch>=args.start_epoch-1:
-        #    EPOCH_update_pseudo_label(val_loader, classifier, pseudo_labels, args, epoch)
-        #if epoch>=args.start_epoch:
-        #    pseudo_labels.time_consistency_weight()
+            best_model = copy.deepcopy(model.state_dict())
+            best_acc1 = acc1
 
     print("best_acc1 = {:3.3f}".format(best_acc1))
 
     # evaluate on test set
-    classifier.load_state_dict(best_model)
-    acc1 = validate(test_loader, classifier, args)
+    model.load_state_dict(best_model)
+    acc1 = validate(test_loader, model, args)
     print("test_acc1 = {:3.3f}".format(acc1))
 
 def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverDataIterator, model: nn.Module,
-          jmmd_loss: JointMultipleKernelMaximumMeanDiscrepancy, optimizer: SGD, lr_sheduler: StepwiseLR,
-          pseudo_labels: PseudoLabeling, epoch: int, args: argparse.Namespace):
+         optimizer: SGD, lr_sheduler: StepwiseLR, pseudo_labels: PseudoLabeling, epoch: int, args: argparse.Namespace):
     losses = AverageMeter('Loss', ':3.2f')
     cls_losses = AverageMeter('Cls Loss', ':3.2f')
     trans_losses = AverageMeter('Trans Loss', ':5.4f')
@@ -207,12 +185,9 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
 
     # switch to train mode
     model.train()
-    jmmd_loss.train()
+    # jmmd_loss.train()
 
     for i in range(args.iters_per_epoch):
-        model.train()
-        jmmd_loss.train()
-
         lr_sheduler.step()
 
         x_s, labels_s, index_s = next(train_source_iter)
@@ -230,20 +205,20 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         y_s, y_t = y.chunk(2, dim=0)
         f_s, f_t = f.chunk(2, dim=0)
 
-        cls_loss = F.cross_entropy(y_s, labels_s)
-        transfer_loss = jmmd_loss(
-            (f_s, F.softmax(y_s, dim=1)),
-            (f_t, F.softmax(y_t, dim=1))
-        )
+        loss = 0.0
 
-        loss = cls_loss + transfer_loss * args.lambda1
+        cls_loss = F.cross_entropy(y_s, labels_s)
+        loss += cls_loss
+
+        # transfer_loss = jmmd_loss(
+        #     (f_s, F.softmax(y_s, dim=1)),
+        #     (f_t, F.softmax(y_t, dim=1))
+        # )
+        # loss += transfer_loss * args.lambda1
 
         if epoch >= args.start_epoch:
             with torch.no_grad():
                 pseudo_labels_t = pseudo_labels.get_hard_pseudo_label(index_t)
-                pseudo_labels.entropy_weight()
-                # pseudo_labels.threshold_weight()
-                #pseudo_labels.difference_to_one_weight()
                 weights_t = pseudo_labels.get_weight(index_t)
             weights_t = F.softmax(weights_t, dim=0)
             
@@ -257,11 +232,10 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
                 for k in range(j+1, args.loss_sample_num):
                     y1_s, y1_t = ys_mc[j].chunk(2, dim=0)
                     y2_s, y2_t = ys_mc[k].chunk(2, dim=0)
-                    joint_loss += jointdisagreement(y1_s, y1_t, y2_s, y2_t, labels_s, pseudo_labels_t, weights_t)
+                    joint_loss += CE_disagreement(y1_s, y1_t, y2_s, y2_t, labels_s, pseudo_labels_t, weights_t)
 
             joint_loss = joint_loss* 2.0 / ((args.loss_sample_num-1.0)*args.loss_sample_num)
             loss += joint_loss * args.lambda2
-
 
         cls_acc = accuracy(y_s, labels_s)[0]
         tgt_acc = accuracy(y_t, labels_t)[0]
@@ -270,8 +244,8 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         cls_accs.update(cls_acc.item(), x_s.size(0))
         tgt_accs.update(tgt_acc.item(), x_t.size(0))
         cls_losses.update(cls_loss.item(), x_s.size(0))
-        trans_losses.update(transfer_loss.item(), x_s.size(0))
-
+        # trans_losses.update(transfer_loss.item(), x_s.size(0))
+        trans_losses.update(0.0, x_s.size(0))
         try:
             joint_losses.update(joint_loss.item(), x_s.size(0))
         except:
@@ -280,10 +254,9 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
+        if args.gradclip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.gradclip)
         optimizer.step()
-
-        #if epoch>=args.start_epoch-1:
-        #    ITERATION_update_pseudo_label(x_t, index_t, model, pseudo_labels, args, epoch)
 
         if i % args.print_freq == 0:
             progress.display(i)
@@ -293,9 +266,7 @@ def validate(val_loader: DataLoader, model: nn.Module, args: argparse.Namespace)
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
     progress = ProgressMeter(
-        len(val_loader),
-        [losses, top1, top5],
-        prefix='Test: ')
+        len(val_loader), [losses, top1, top5], prefix='Test: ')
 
     model.eval()
 
@@ -325,7 +296,7 @@ def psudo_label_update_and_weight_calculate(train_source_loader, val_loader, mod
     if args.prob_type == 'prediction':
         EPOCH_update_pseudo_label(val_loader, model, pseudo_labels, args, epoch)
     elif args.prob_type == 'source_prototype':
-        EPOCH_PROTOTYPE_S_update(train_source_loader, val_loader, classifier, pseudo_labels, args, epoch)
+        EPOCH_PROTOTYPE_S_update(train_source_loader, val_loader, model, pseudo_labels, args, epoch)
     elif args.prob_type == 'target_prototype':
         EPOCH_PROTOTYPE_T_update(val_loader, model, pseudo_labels, args, epoch)
     elif args.prob_type == 'prediction_avg':
@@ -334,29 +305,26 @@ def psudo_label_update_and_weight_calculate(train_source_loader, val_loader, mod
     else:
         raise ValueError(f'pesudo label unpdate type not found')
 
-                    # pseudo_labels.threshold_weight()
-                #pseudo_labels.difference_to_one_weight()
-                weights_t = pseudo_labels.get_weight(index_t)
-
-    if args.weights_type == 'uncertainty':
-
-    elif args.weights_type == 'entropy':
-        pseudo_labels.entropy_weight()
-    elif args.weights_type =='threshold':
-        pseudo_labels.threshold_weight()
-    elif args.weights_type == 'max_value':
-        pseudo_labels.difference_to_one_weight()
-    elif args.weights_type == 'time_consistency':
-        pseudo_labels.time_consistency_weight():
-    else:
-        raise ValueError(f'pesudo label weight unpdate type not found')
+    if epoch>=args.start_epoch:
+        if args.weights_type == 'uncertainty':
+            uncertainty_update(val_loader, model, pseudo_labels, args, epoch)
+        elif args.weights_type == 'entropy':
+            pseudo_labels.entropy_weight()
+        elif args.weights_type =='threshold':
+            pseudo_labels.threshold_weight()
+        elif args.weights_type == 'max_value':
+            pseudo_labels.difference_to_one_weight()
+        elif args.weights_type == 'time_consistency':
+            pseudo_labels.time_consistency_weight()
+        else:
+            raise ValueError(f'pesudo label weight unpdate type not found')
 
 def uncertainty_update(target_loader: DataLoader, model: nn.Module, pseudo_labels: PseudoLabeling, args, epoch):
     model.eval()
     model.activate_dropout()
 
     with torch.no_grad():
-        for i, (images, target, index) in enumerate(loader):
+        for i, (images, target, index) in enumerate(target_loader):
             images = images.to(device)
             ys = []
             for j in range(args.uncertainty_sample_num):
@@ -366,7 +334,7 @@ def uncertainty_update(target_loader: DataLoader, model: nn.Module, pseudo_label
             ys = torch.cat(ys, 0)
             y = torch.mean(ys, 0)
 
-            if args.prob_type == 'prediction_avg'
+            if args.prob_type == 'prediction_avg':
                 if args.prob_ema==True:
                     pseudo_labels.EMA_update_p(y, index, epoch)
                 else:

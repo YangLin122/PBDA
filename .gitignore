@@ -132,3 +132,5 @@ dmypy.json
 */__pycache__
 
 .vscode/*
+
+logs/*
