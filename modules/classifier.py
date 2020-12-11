@@ -127,11 +127,19 @@ class MCdropClassifier(nn.Module):
         pred = self.predition_layer(hidden)
         return pred, hidden
     
-    def get_parameters(self) -> List[Dict]:
-        params = [
-            {"params": self.backbone.parameters(), "lr_mult": 0.1},
-            {"params": self.bottleneck_layer.parameters(), "lr_mult": 1.},
-            {"params": self.classifier_layer.parameters(), "lr_mult": 1.},
-            {"params": self.predition_layer.parameters(), "lr_mult": 1.},
-        ]
+    def get_parameters(self, freeze_backbone=False, backbone_decay=0.1) -> List[Dict]:
+        if freeze_backbone:
+            params = [
+                {"params": self.bottleneck_layer.parameters(), "lr_mult": 1.},
+                {"params": self.classifier_layer.parameters(), "lr_mult": 1.},
+                {"params": self.predition_layer.parameters(), "lr_mult": 1.},
+            ]
+
+        else:
+            params = [
+                {"params": self.backbone.parameters(), "lr_mult": backbone_decay},
+                {"params": self.bottleneck_layer.parameters(), "lr_mult": 1.},
+                {"params": self.classifier_layer.parameters(), "lr_mult": 1.},
+                {"params": self.predition_layer.parameters(), "lr_mult": 1.},
+            ]
         return params

@@ -57,14 +57,15 @@ def get_args():
     parser.add_argument('--dropout_rate', default=0.5, type=float)
     parser.add_argument('--dropout_type', default='Bernoulli', type=str)
     parser.add_argument('--freeze_backbone', default=False, type=bool)
+    parser.add_argument('--backbone_decay', default=0.1, type=float)
+    parser.add_argument('--freeze_bn', default=False, type=bool)
 
     # loss args
     parser.add_argument('--lambda1', default=1.0, type=float, help='the trade-off hyper-parameter for transfer loss')
     parser.add_argument('--lambda2', default=1.0, type=float, help='the trade-off hyper-parameter for joint loss')
     parser.add_argument('--linear', default=False, action='store_true',  help='whether use the linear version')
     parser.add_argument('--loss_sample_num', default=3, type=int, help='number of models sampled to calcualate loss')
-
-    parser.add_argument('--temperature', default=0.1, type=float)
+    parser.add_argument('--temperature', default=1.0, type=float)
 
     # pseudo args
     parser.add_argument('--start_epoch', default=10, type=int)
@@ -74,7 +75,7 @@ def get_args():
     parser.add_argument('--weights_type', default='entropy', type=str, choices=['uncertainty', 'entropy', 'threshold', 'max_value', 'time_consistency'])
     parser.add_argument('--threshold', default=0.5, type=float)
     parser.add_argument('--tc_ema_gamma', default=0.9, type=float, help='EMA of time consistency')
-    parser.add_argument('--uncertainty_type', default='predictive_entropy', type=str, choices=['predictive_entropy', 'mutual_info', 'variation_ratio'])
+    parser.add_argument('--uncertainty_type', default='variation_ratio', type=str, choices=['predictive_entropy', 'mutual_info', 'variation_ratio'])
     parser.add_argument('--uncertainty_sample_num', default=100, type=int, help='number of models sampled to calcualate uncertainty')
 
     # other args
@@ -150,7 +151,7 @@ def main(args: argparse.Namespace):
     ).to(device)
 
     # define optimizer
-    parameters = model.get_parameters()
+    parameters = model.get_parameters(args.freeze_backbone, args.backbone_decay)
     optimizer = SGD(parameters, args.lr, momentum=args.momentum, weight_decay=args.wd, nesterov=True)
     lr_sheduler = StepwiseLR(optimizer, init_lr=args.lr, gamma=args.gamma, decay_rate=args.decay_rate)
 
@@ -183,7 +184,7 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
          optimizer: SGD, lr_sheduler: StepwiseLR, pseudo_labels: PseudoLabeling, epoch: int, args: argparse.Namespace):
     losses = AverageMeter('Loss', ':3.2f')
     cls_losses = AverageMeter('Cls Loss', ':3.2f')
-    trans_losses = AverageMeter('Trans Loss', ':5.4f')
+    trans_losses = AverageMeter('Trans Loss', ':5.2f')
     joint_losses = AverageMeter('Joint Loss', ':3.2f')
     cls_accs = AverageMeter('Cls Acc', ':3.1f')
     tgt_accs = AverageMeter('Tgt Acc', ':3.1f')
@@ -194,6 +195,10 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
         prefix="Epoch: [{}]".format(epoch))
 
     model.train()
+    if args.freeze_bn:
+		for m in model.backbone.modules():
+			if isinstance(m, nn.BatchNorm2d):
+				m.eval()
     # jmmd_loss.train()
 
     for i in range(args.iters_per_epoch):
@@ -229,21 +234,21 @@ def train(train_source_iter: ForeverDataIterator, train_target_iter: ForeverData
             with torch.no_grad():
                 pseudo_labels_t = pseudo_labels.get_hard_pseudo_label(index_t)
                 weights_t = pseudo_labels.get_weight(index_t)
+
+            # print(F.softmax(weights_t, dim=0), F.softmax(weights_t/0.1, dim=0))
+
             weights_t = F.softmax(weights_t/args.temperature, dim=0)
             
-            ys_mc = []
-            for j in range(args.loss_sample_num):
-                y_mc, _ = model.head_forward(h)
-                ys_mc.append(y_mc)
-
             joint_loss = 0.0
             for j in range(args.loss_sample_num):
-                for k in range(j+1, args.loss_sample_num):
-                    y1_s, y1_t = ys_mc[j].chunk(2, dim=0)
-                    y2_s, y2_t = ys_mc[k].chunk(2, dim=0)
-                    joint_loss += CE_disagreement(y1_s, y1_t, y2_s, y2_t, labels_s, pseudo_labels_t, weights_t)
+                y_1, _ = model.head_forward(h)
+                y1_s, y1_t = y_1.chunk(2, dim=0)
+                y_2, _ = model.head_forward(h)
+                y2_s, y2_t = y_2.chunk(2, dim=0)
 
-            joint_loss = joint_loss* 2.0 / ((args.loss_sample_num-1.0)*args.loss_sample_num)
+                joint_loss += CE_disagreement(y1_s, y1_t, y2_s, y2_t, labels_s, pseudo_labels_t, weights_t)
+
+            joint_loss = joint_loss / args.loss_sample_num
             loss += joint_loss * args.lambda2
 
         cls_acc = accuracy(y_s, labels_s)[0]

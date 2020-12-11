@@ -1,7 +1,7 @@
-for i in 0.0 0.1 0.2 0.5 1.0 2.0
+for i in 'entropy' 'threshold' 'max_value'
 do
     python -u train.py\
     --source D \
     --target A  \
-    --lambda2 $i
+    --weights_type $i
 done
